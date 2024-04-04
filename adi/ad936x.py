@@ -7,6 +7,10 @@ from adi.rx_tx import rx_tx_def
 
 from .dsp import _dec_int_fpga_filter
 
+from typing import List, Union
+
+import numpy as np
+
 
 class ad9364(rx_tx_def, context_manager):
     """AD9364 Transceiver"""
@@ -274,3 +278,88 @@ loopback:                {self.loopback:<12} 0=Disabled, 1=Digital, 2=RF
 
 """
         return retstr
+
+class PlutoTimestamped(ad9364, _dec_int_fpga_filter):
+    _device_name = "PlutoSDR w/ timestamping"
+    _uri_auto = "ip:pluto.local"
+    _timestamping = True
+    _timestamp = -1 # 
+
+    def __repr__(self):
+        retstr = f"""Pluto(uri="{self.uri}") object "{self._device_name}" with following key properties:
+
+rx_lo:                   {self.rx_lo / 1000000:<12} MHz, Carrier frequency of RX path
+rx_hardwaregain_chan0    {self.rx_hardwaregain_chan0:<12} dB, Gain applied to RX path. Only applicable when gain_control_mode is set to 'manual'
+rx_rf_bandwidth:         {self.rx_rf_bandwidth / 1000000:<12} MHz, Bandwidth of front-end analog filter of RX path
+gain_control_mode_chan0: {self.gain_control_mode_chan0:<12} Receive path AGC Options: slow_attack, fast_attack, manual
+
+tx_lo:                   {self.tx_lo / 1000000:<12} MHz, Carrier frequency of TX path
+tx_hardwaregain_chan0:   {self.tx_hardwaregain_chan0:<12} dB, Attenuation applied to TX path
+tx_rf_bandwidth:         {self.tx_rf_bandwidth / 1000000:<12} MHz, Bandwidth of front-end analog filter of TX path
+tx_cyclic_buffer:        {self.tx_cyclic_buffer:<12} Toggles cyclic buffer
+
+filter:                  {str(self.filter):<12} FIR filter file
+sample_rate:             {self.sample_rate / 1000000:<12} MSPS, Sample rate RX and TX paths
+loopback:                {self.loopback:<12} 0=Disabled, 1=Digital, 2=RF
+
+"""
+        return retstr
+    
+    @property
+    def timestamp(self):
+        '''Returns the timestamp of the most recent call to rx().
+           Returns -1 if rx() hasn't yet been called.
+           Returns -2 if timestamp headers could not be found.'''
+        return self._timestamp
+    
+    def _process_timestamp(self, head):
+        if len(head) != 2:
+            raise BaseException('Timestamping only implemented on 2-channel Pluto.')
+        # Define timestamping SYNC codewords.
+        SYNC1 = 0xBBBBAAAA
+        SYNC2 = 0xDDDDCCCC
+        SYNC3 = 0xFFFFEEEE
+        SYNC4 = 0xABCDDCBA
+        SYNC5 = 0xFEDCCDEF
+        SYNC6 = 0xDFCBAEFD
+        full_header = np.bitwise_or(np.left_shift(head[1].astype(np.uint32), 16), head[0])
+        if (full_header[0] == SYNC1 and full_header[1] == SYNC2 and full_header[2] == SYNC3 and
+            full_header[3] == SYNC4 and full_header[4] == SYNC5 and full_header[5] == SYNC6):
+            self._timestamp = (full_header[7] << 32) | full_header[6]
+        else:
+            self._timestamp = -2
+    
+    def _rx_buffered_data(self) -> Union[List[np.ndarray], np.ndarray]:
+        """_rx_buffered_data: Read data from RX buffer and process timestamp.
+
+        Returns:
+            List of numpy arrays containing the data from the RX buffer that are
+            channel interleaved
+        """
+        HEADER_SIZE = 16 # Size in bytes of the timestamping header for each channel
+        if not self._rxbuf:
+            self._rx_init_channels()
+        self._rxbuf.refill()
+
+        data_channel_interleaved = []
+        head = [] # Timestamping Header data
+        ecn = []
+        if self._complex_data:
+            for m in self.rx_enabled_channels:
+                ecn.extend(
+                    (self._rx_channel_names[m * 2], self._rx_channel_names[m * 2 + 1])
+                )
+        else:
+            ecn = [self._rx_channel_names[m] for m in self.rx_enabled_channels]
+
+        for name in ecn:
+            chan = self._rxadc.find_channel(name)
+            bytearray_data = chan.read(self._rxbuf)  # Do local type conversion
+            # create format strings
+            df = chan.data_format
+            fmt = ("i" if df.is_signed is True else "u") + str(df.length // 8)
+            data_channel_interleaved.append(np.frombuffer(bytearray_data[HEADER_SIZE:], dtype=fmt))
+            head.append(np.frombuffer(bytearray_data[:HEADER_SIZE], f'u{df.length // 8}'))
+
+        self._process_timestamp(head)
+        return data_channel_interleaved
