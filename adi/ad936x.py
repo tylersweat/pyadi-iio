@@ -363,3 +363,7 @@ loopback:                {self.loopback:<12} 0=Disabled, 1=Digital, 2=RF
 
         self._process_timestamp(head)
         return data_channel_interleaved
+    
+    def rx_timestamped(self):
+        # Returns timestamp and data.
+        return self._timestamp, self.rx()
