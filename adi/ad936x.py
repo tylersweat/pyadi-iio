@@ -366,4 +366,5 @@ loopback:                {self.loopback:<12} 0=Disabled, 1=Digital, 2=RF
     
     def rx_timestamped(self):
         # Returns timestamp and data.
-        return self._timestamp, self.rx()
+        data = self.rx()
+        return self._timestamp, data
